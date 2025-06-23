@@ -1,0 +1,355 @@
+# .github/workflows/ci-cd.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ julian_montoya, main ]
+  pull_request:
+    branches: [ julian_montoya, main ]
+
+env:
+  NODE_VERSION: '18'
+  AWS_REGION: 'us-east-1'
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: productos-api
+  ECS_SERVICE: productos-api-service
+  ECS_CLUSTER: productos-api-cluster
+  ECS_TASK_DEFINITION: productos-api-task
+
+jobs:
+  # Job 1: Tests and Code Quality
+  test:
+    name: 🧪 Tests & Code Quality
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 🔧 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Run ESLint
+        run: npm run lint
+
+      - name: 🧪 Run unit tests
+        run: npm run test:cov
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+
+      - name: 🧪 Run e2e tests
+        run: npm run test:e2e
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+
+      - name: 📊 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: 📋 SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Job 2: Security Scan
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 🔧 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Run npm audit
+        run: npm audit --audit-level=high
+
+      - name: 🔍 Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  # Job 3: Build and Push Docker Image
+  build:
+    name: 🐳 Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.ref == 'refs/heads/julian_montoya' || github.ref == 'refs/heads/main'
+    
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      image-tag: ${{ steps.image.outputs.image-tag }}
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 🔐 Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 🏷️ Generate image tag
+        id: image-tag
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/julian_montoya" ]; then
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "tag=stable" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🐳 Build, tag, and push image to Amazon ECR
+        id: build-image
+        run: |
+          IMAGE_TAG=${{ steps.image-tag.outputs.tag }}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: 📤 Set outputs
+        id: image
+        run: |
+          echo "image=${{ steps.build-image.outputs.image }}" >> $GITHUB_OUTPUT
+          echo "image-tag=${{ steps.image-tag.outputs.tag }}" >> $GITHUB_OUTPUT
+
+  # Job 4: Deploy Infrastructure with Terraform
+  infrastructure:
+    name: 🏗️ Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/julian_montoya'
+    
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: ⚡ Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 🔧 Terraform Init
+        run: terraform init
+
+      - name: 📋 Terraform Plan
+        run: terraform plan -var="environment=production" -out=tfplan
+
+      - name: 🚀 Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: 📤 Export Terraform outputs
+        id: terraform-outputs
+        run: |
+          echo "rds_endpoint=$(terraform output -raw rds_endpoint)" >> $GITHUB_OUTPUT
+          echo "secrets_manager_arn=$(terraform output -raw secrets_manager_arn)" >> $GITHUB_OUTPUT
+
+  # Job 5: Deploy to ECS
+  deploy:
+    name: 🚀 Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [build, infrastructure]
+    if: github.ref == 'refs/heads/julian_montoya'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 📝 Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition.json
+          container-name: productos-api
+          image: ${{ needs.build.outputs.image }}
+
+      - name: 🚀 Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: 🧪 Run health check
+        run: |
+          sleep 30
+          # Get the ALB DNS name
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names productos-api-alb --query 'LoadBalancers[0].DNSName' --output text)
+          
+          # Health check
+          for i in {1..10}; do
+            if curl -f http://$ALB_DNS/health; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "⏳ Attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+  # Job 6: Integration Tests (Post-deployment)
+  integration-tests:
+    name: 🔍 Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/julian_montoya'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 🔧 Install dependencies
+        run: npm ci
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 🧪 Run integration tests
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names productos-api-alb --query 'LoadBalancers[0].DNSName' --output text)
+          export API_BASE_URL=http://$ALB_DNS
+          npm run test:integration
+        env:
+          NODE_ENV: test
+
+  # Job 7: Rollback (if needed)
+  rollback:
+    name: 🔄 Rollback
+    runs-on: ubuntu-latest
+    needs: [deploy, integration-tests]
+    if: failure() && github.ref == 'refs/heads/julian_montoya'
+
+    steps:
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 🔄 Rollback ECS service
+        run: |
+          # Get the previous task definition
+          PREVIOUS_TASK_DEF=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].taskDefinition' --output text)
+          PREVIOUS_REVISION=$(echo $PREVIOUS_TASK_DEF | grep -o '[0-9]*$')
+          ROLLBACK_REVISION=$((PREVIOUS_REVISION - 1))
+          
+          if [ $ROLLBACK_REVISION -gt 0 ]; then
+            ROLLBACK_TASK_DEF="${PREVIOUS_TASK_DEF%:*}:$ROLLBACK_REVISION"
+            aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition $ROLLBACK_TASK_DEF
+            echo "🔄 Rolling back to task definition: $ROLLBACK_TASK_DEF"
+          else
+            echo "❌ No previous version to rollback to"
+          fi
+
+  # Job 8: Notification
+  notify:
+    name: 📢 Notify
+    runs-on: ubuntu-latest
+    needs: [deploy, integration-tests]
+    if: always() && github.ref == 'refs/heads/julian_montoya'
+
+    steps:
+      - name: 📢 Notify Slack
+        uses: 8398a7/action-slack@v3
+        if: always()
+        with:
+          status: ${{ job.status }}
+          author_name: GitHub Actions
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: 📧 Send email notification
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_PASSWORD }}
+          subject: '❌ Deployment Failed: ${{ github.repository }}'
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: noreply@github.com
+          body: |
+            Deployment failed for ${{ github.repository }}
+            
+            Branch: ${{ github.ref }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Please check the GitHub Actions logs for more details.
