@@ -1,50 +1,57 @@
 # Nombre: Julian Andres Montoya Carvajal
 # C.C 1214727927
 
-Despliegue en AWS ECS + RDS
-Arquitectura de Despliegue
-Componentes Principales
+## 1. Despliegue en AWS ECS + RDS
 
-AWS ECS (Elastic Container Service): Para ejecutar la aplicación NestJS en contenedores
-AWS RDS (PostgreSQL): Base de datos managed
-AWS ALB (Application Load Balancer): Balanceador de carga
-AWS VPC: Red privada virtual
-AWS Secrets Manager: Gestión de secretos
-AWS ECR: Registro de contenedores Docker
+### Arquitectura de Despliegue
 
-Proceso de Despliegue
-1. Preparación del Contenedor Docker:
+#### Componentes Principales
+
+* AWS ECS (Elastic Container Service): Para ejecutar la aplicación NestJS en contenedores
+* AWS RDS (PostgreSQL): Base de datos managed
+* AWS ALB (Application Load Balancer): Balanceador de carga
+* AWS VPC: Red privada virtual
+* AWS Secrets Manager: Gestión de secretos
+* AWS ECR: Registro de contenedores Docker
+
+### Proceso de Despliegue
+
+1. Preparación del Contenedor Docker
+
 2. Configuración de ECS
-Task Definition:
 
-CPU: 512 unidades (0.5 vCPU)
-Memory: 1024 MB (1 GB)
-Network Mode: awsvpc
-Launch Type: Fargate
+#### Task Definition:
 
-Service Configuration:
+* CPU: 512 unidades (0.5 vCPU)
+* Memory: 1024 MB (1 GB)
+* Network Mode: awsvpc
+* Launch Type: Fargate
 
-Desired Count: 2 instancias (para alta disponibilidad)
-Health Check: GET /health endpoint
-Auto Scaling: Basado en CPU utilization (target 70%)
+#### Service Configuration:
+
+* Desired Count: 2 instancias (para alta disponibilidad)
+* Health Check: GET /health endpoint
+* Auto Scaling: Basado en CPU utilization (target 70%)
 
 3. Configuración de RDS
-Especificaciones:
 
-Engine: PostgreSQL 15
-Instance Class: db.t3.micro (para desarrollo) / db.t3.small (para producción)
-Storage: 20 GB GP2 con auto-scaling habilitado
-Multi-AZ: Habilitado para producción
-Backup: Retención de 7 días
-Security Groups: Solo acceso desde ECS tasks
+#### Especificaciones:
 
-4. Gestión de Secretos con AWS Secrets Manager
-¿Por qué AWS Secrets Manager?
+* Engine: PostgreSQL 15
+* Instance Class: db.t3.micro (para desarrollo) / db.t3.small (para producción)
+* Storage: 20 GB GP2 con auto-scaling habilitado
+* Multi-AZ: Habilitado para producción
+* Backup: Retención de 7 días
+* Security Groups: Solo acceso desde ECS tasks
 
-Rotación automática de credenciales
-Cifrado en reposo y en tránsito
-Auditoría completa de accesos
-Integración nativa con RDS y ECS
+## 2. Gestión de Secretos con AWS Secrets Manager
+
+### ¿Por qué AWS Secrets Manager?
+
+* Rotación automática de credenciales
+* Cifrado en reposo y en tránsito
+* Auditoría completa de accesos
+* Integración nativa con RDS y ECS
 
 
 <p align="center">
